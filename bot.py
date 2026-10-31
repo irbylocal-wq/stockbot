@@ -90,13 +90,30 @@ def current_stock(page):
     return Decimal(match.group())
 
 
+
+def retry_read(action, attempts=3):
+    """Retry only read/navigation operations, never stock writes."""
+    import time
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+    for n in range(attempts):
+        try:
+            return action()
+        except PlaywrightTimeout:
+            if n == attempts - 1:
+                raise
+            time.sleep(min(2 ** n, 8))
+
+
+def safe_goto(page, url):
+    return retry_read(lambda: page.goto(url, wait_until='domcontentloaded', timeout=30000))
+
 def search_existing(page, barcode):
-    page.goto(STOCK_URL, wait_until='domcontentloaded')
+    safe_goto(page, STOCK_URL)
     locate_field(page,'PLU / Barcode','Barcode','PLU').fill(barcode)
     search = page.get_by_role('button', name=re.compile('Search', re.I))
     if search.count()!=1: raise RuntimeError('Search button not uniquely identified')
-    search.click()
-    page.wait_for_timeout(900)
+    retry_read(lambda: search.click(timeout=10000))
+    page.wait_for_load_state('domcontentloaded')
     # Product identity must be visible. Missing/ambiguous result triggers new-product path.
     body = page.locator('body').inner_text()
     if barcode not in body:
@@ -111,7 +128,7 @@ def add_new_product(page, entry, live):
     if missing:
         raise RuntimeError('New product requires verified catalog fields: '+', '.join(missing))
     if not live: return 'WOULD_CREATE'
-    page.goto(ADD_URL, wait_until='domcontentloaded')
+    safe_goto(page, ADD_URL)
     # iPOSG has an Add Stock form; these selectors need confirmation in the user's account.
     values = [('Barcode', 'iposg_barcode'),('Description','description'),
               ('Selling Price','selling_price'),('Cost Price','cost_price'),
@@ -144,7 +161,9 @@ def adjust(page, units, current, live):
     locate_field(page,'Adjustment Qty','Adjustment Quantity').fill(str(adjustment))
     button = page.get_by_role('button',name=re.compile('Update Stock',re.I))
     if button.count()!=1: raise RuntimeError('Cannot safely identify Update Stock button')
-    button.click(); page.wait_for_timeout(1000)
+    # Never retry a stock-changing click: it may have succeeded despite a timeout.
+    button.click(timeout=30000)
+    page.wait_for_load_state('domcontentloaded')
     return {'adjustment':str(adjustment),'expected':str(expected)}
 
 
@@ -160,7 +179,7 @@ def main():
         browser = p.chromium.launch_persistent_context(str(ROOT/'.browser_profile'),headless=False)
         page = browser.pages[0] if browser.pages else browser.new_page()
         if args.login:
-            page.goto('https://cloud.iposg.com/login')
+            safe_goto(page, 'https://cloud.iposg.com/login')
             input('Log in using browser, then press Enter here to save session...')
             browser.close(); return
         rows=read_invoice(args.invoice)
