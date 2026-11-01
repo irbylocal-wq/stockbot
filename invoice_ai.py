@@ -119,6 +119,12 @@ def extract_invoice(path, output_dir):
             "No stock has been changed.")
     if not matched:
         raise RuntimeError("No verified products to update")
+    # Aggregate repeated invoice lines before the stock updater deduplicates by product.
+    totals = {}
+    for row in matched:
+        code = row["booker_code"]
+        totals[code] = totals.get(code, 0) + int(row["cases"])
+    matched = [{"booker_code": code, "cases": str(qty)} for code, qty in totals.items()]
     result = output_dir / (path.stem + "_verified.csv")
     with result.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["booker_code", "cases"])
