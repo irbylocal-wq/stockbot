@@ -1,45 +1,43 @@
-# iPOSG Booker Invoice Stock Bot (Windows)
+# iPOSG Invoice Stock Automation
 
-This is a working **local prototype** with invoice OCR, explicit product mappings, case-to-unit conversion, negative-stock correction, duplicate protection, persistent browser login, and iPOSG browser automation. It has **not** been tested against your logged-in iPOSG account. No website changes happen unless you run with `--live`.
+## What is implemented
+- Flask invoice-upload dashboard with token authentication and job-status API.
+- PDF/photo invoice extraction using an OpenAI vision model when OPENAI_API_KEY is configured.
+- Local background worker launches the existing Playwright iPOSG updater without per-item approvals.
+- Existing updater supports negative-stock correction, new-product creation with complete mapped fields, and per-item duplicate tracking.
+- OCR extraction reports unmatched products; it does not silently invent barcodes or prices.
 
-## Setup (Windows PowerShell)
+## Important deployment limitation
+**Vercel serves the web dashboard, but cannot run this project's persistent local Playwright browser worker.** The Vercel upload endpoint intentionally returns HTTP 503 rather than falsely claiming that inventory was updated. Deploy the dashboard and worker together on a persistent Windows PC or suitable VM. The local browser must first be logged into iPOSG.
 
-1. Install Python 3.11+ and Tesseract OCR for Windows. Ensure `tesseract.exe` is on PATH, or set `TESSERACT_CMD` to its full path.
-2. Open PowerShell in this folder:
+## Windows setup
+Install Python 3.11+, Tesseract OCR and Chromium for Playwright.
+Run in PowerShell:
 
-   `py -m venv .venv`
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m playwright install chromium
+$env:STOCKBOT_ADMIN_TOKEN = "CHOOSE-A-LONG-RANDOM-SECRET"
+$env:OPENAI_API_KEY = "YOUR-OPENAI-API-KEY"
+python bot.py --login
+python app.py
+```
 
-   `.\.venv\Scripts\Activate.ps1`
+Open http://127.0.0.1:5000, enter your admin token, and upload a PDF, image or CSV. Use the job ID returned by the upload endpoint and GET /api/jobs/<id> with the X-Stockbot-Token header to check progress.
 
-   `pip install -r requirements.txt`
+**Do not expose this Flask development server to the public internet.** Use a production WSGI server and HTTPS authentication if deploying beyond localhost. Keep credentials, invoices, browser profiles and runtime data private.
 
-   `python -m playwright install chromium`
+## Still required before unattended production use
+- The existing products.csv is only a sample and has **blank iPOSG barcodes, prices and departments**. It cannot identify arbitrary suppliers or create arbitrary missing products.
+- Live iPOSG selectors and new-product forms have not been validated against an authenticated account. A live test with representative items is necessary.
+- Internet lookup for missing case prices, barcodes and retail prices is **not implemented**. AI extraction only reads the invoice; it does not verify unknown products on the web.
+- The local worker uses a thread and SQLite job records. It is not a durable distributed queue; restarting the process may interrupt an active job. Use a persistent queue for hosted production.
+- Unknown or ambiguous invoice items are reported as unresolved and the job fails without changing stock. This prevents arbitrary wrong-barcode updates.
+- Case-to-unit calculations depend on verified product mappings. Loose-unit handling is not yet supported.
+- The app and bot have not been end-to-end tested against your iPOSG account. Do not treat this as production-certified.
 
-3. Run `python bot.py --login`. A browser opens. Log in yourself (never put passwords in code), then return to PowerShell and press Enter. Your browser session is saved in `.browser_profile` on your computer.
-4. Open `products.csv`. Fill in each **real iPOSG barcode** and verify `units_per_case`. Booker supplier codes are NOT necessarily iPOSG barcodes. The included rows are examples, not confirmed mappings.
-5. Place a clear invoice photo or PDF in `invoices` (create the folder if needed).
-6. Run `python bot.py --invoice invoices\invoice.jpg` to generate a **dry-run** report. Read `reports/` and check all quantities and matched barcodes.
-7. After confirming mappings and browser behavior, run `python bot.py --invoice invoices\invoice.jpg --live` to submit updates. Use one test item first. **Live mode can change inventory.**
-
-## Stock rule (your requested rule)
-
-- `purchased_units = invoice_cases * units_per_case`
-- If current stock is negative: `adjustment = purchased_units - current_stock` (e.g. -1 + 8 adjustment -> 7)
-- Otherwise: `adjustment = purchased_units` (e.g. 5 + 8 -> 13)
-
-## Limitations and safeguards
-
-- OCR on wrinkled/blurred receipts is imperfect. The bot **skips** lines without an unambiguous Booker code, quantity, and explicit mapped barcode. It does not invent product barcodes.
-- OCR quantity extraction is conservative and depends on Booker receipt layout. Check dry-run output before live operation. When a product is missing, the bot attempts to create it first using verified fields in products.csv, then resumes the normal quantity adjustment. Missing required fields stop that item rather than inventing values.
-- The iPOSG Quick Adjustment UI was inferred from screenshots, not verified by programmatic inspection. If the site markup differs, the bot stops with an error instead of guessing. The selected adjustment type is the one you demonstrated: `Stock Transfer In (Sale at Cost)`; confirm it is appropriate for your shop before live use.
-- Live mode processes **one item per submission**, then checks the resulting stock. It stores completed item IDs in `state.json`, so a retry skips successful items. If verification is ambiguous it stops. Do not delete `state.json` casually.
-- This bot uses a local browser profile. Do not share the `.browser_profile` folder or `state.json` with anyone.
-- Full hands-off automation requires first configuring product mappings, OCR validation, and UI selectors against your own account. This prototype does not claim that all invoices will be read perfectly.
-
-## NEW: Create missing products first
-
-If a barcode is not found in iPOSG, the bot attempts to add the product before continuing with its stock adjustment. To permit this, add the following columns to `products.csv`: `selling_price,cost_price,vat,department`. Fill in the exact approved values for each product. Never guess prices, VAT, barcodes or department. If any required value is missing, the bot stops that item and reports the missing field.
-
-The create form selectors and save button have **not** been verified on the live iPOSG site. A dry run never submits any changes.
-
-For scanned invoices, OCR produces `reports/<invoice>_review.csv`. Confirm the extracted Booker codes and enter case quantities in that file, then use that CSV with `--invoice`. This is necessary because OCR alone is not reliable enough to silently update stock.
+## Stock rule
+If current stock is negative, adjustment = purchased units - current stock.
+Otherwise, adjustment = purchased units. For example, -1 plus 7 purchased requires +8, ending at 7; 5 plus 7 requires +7, ending at 12.
